@@ -22,3 +22,6 @@ Thumbs.db
 
 # Local DB cache
 *.db
+
+# Environment / secrets
+.env

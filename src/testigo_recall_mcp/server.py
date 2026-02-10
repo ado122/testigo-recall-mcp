@@ -36,11 +36,9 @@ mcp = FastMCP(
         "Always search the knowledge base BEFORE reading source files — it's faster "
         "and cheaper.\n\n"
         "IMPORTANT — interpreting results:\n"
-        "- Facts with source='scan' (pr_id starts with 'SCAN:') describe the CURRENT "
-        "state of a module. These are refreshed automatically when PRs touch those files.\n"
-        "- Facts with source='ai' (pr_id starts with 'PR-') describe what a specific PR CHANGED.\n"
-        "- For 'how does X work now?' → use the most recent scan facts (check timestamp).\n"
-        "- For 'what changed?' or 'why?' → use PR facts.\n"
+        "- All facts have pr_id starting with 'SCAN:' and describe the CURRENT state of the code.\n"
+        "- Facts are refreshed automatically when PRs touch those files — the DB always "
+        "reflects the latest merged code.\n"
         "- Always check the 'timestamp' field. More recent = more reliable."
     ),
 )
@@ -152,7 +150,7 @@ def search_codebase(
 def get_module_facts(module_id: str) -> str:
     """Get all extracted facts for a specific module.
 
-    Module IDs look like "SCAN:backend/app/api" or "PR-123".
+    Module IDs look like "SCAN:backend/app/api".
     Use search_codebase first to discover module IDs, then use this
     for a deep dive into a specific module.
 
