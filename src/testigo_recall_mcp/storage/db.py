@@ -164,11 +164,15 @@ class Database:
 
     def get_component_impact(self, component: str) -> list[dict]:
         """Find all PRs where a component appears in dependencies."""
+        # Strip common extensions so "scanner.py" matches "scanner"
+        stem = component.rsplit(".", 1)[0] if "." in component else component
+        # Also match partial paths: "scanner" matches "testigo_recall.scanner"
+        pattern = f"%{stem}%"
         c = self._conn.cursor()
         rows = c.execute(
             "SELECT DISTINCT pr_id, repo, from_component, to_component, relation "
-            "FROM dependencies WHERE from_component = ? OR to_component = ?",
-            (component, component),
+            "FROM dependencies WHERE from_component LIKE ? OR to_component LIKE ?",
+            (pattern, pattern),
         ).fetchall()
         return [dict(r) for r in rows]
 
