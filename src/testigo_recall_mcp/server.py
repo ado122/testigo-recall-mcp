@@ -170,10 +170,13 @@ def _merge_into(target: sqlite3.Connection, source_path: Path) -> int:
     )
 
     # Insert facts (skip id — autoincrement + FTS triggers handle it)
+    # Check if source DB has symbols column (older DBs may not)
+    src_cols = {r[1] for r in target.execute("PRAGMA src.table_info(facts)").fetchall()}
+    symbols_expr = "COALESCE(symbols, '[]')" if "symbols" in src_cols else "'[]'"
     count = target.execute(
         "INSERT INTO facts (pr_id, repo, category, summary, detail, confidence, source, source_files, symbols) "
         "SELECT pr_id, repo, category, summary, detail, confidence, source, source_files, "
-        "COALESCE(symbols, '[]') FROM src.facts"
+        f"{symbols_expr} FROM src.facts"
     ).rowcount
 
     # Insert dependencies
@@ -315,32 +318,40 @@ def get_component_impact(component_name: str) -> str:
 
 @mcp.tool()
 def list_modules(repo_name: str | None = None) -> str:
-    """List all scanned modules in the knowledge base.
+    """List scanned modules in the knowledge base.
 
-    Returns module names so you can use get_module_facts to dive deeper.
+    Without repo_name: returns a compact summary of repos with module/fact counts.
+    With repo_name: returns the full list of modules for that specific repo.
+
+    Always call without repo_name first to discover available repos, then call
+    again with repo_name to get the module list for a specific repo.
 
     Args:
-        repo_name: Optional repository name filter
+        repo_name: Repository name — pass this to get the full module list for one repo
     """
     db = _get_db()
     c = db._conn.cursor()
+
     if repo_name:
         rows = c.execute(
             "SELECT pr_id, repo, COUNT(*) as fact_count "
             "FROM facts WHERE repo = ? GROUP BY pr_id, repo ORDER BY pr_id",
             (repo_name,),
         ).fetchall()
-    else:
-        rows = c.execute(
-            "SELECT pr_id, repo, COUNT(*) as fact_count "
-            "FROM facts GROUP BY pr_id, repo ORDER BY pr_id",
-        ).fetchall()
+        if not rows:
+            return f"No modules found for repo '{repo_name}'."
+        modules = [{"module_id": r["pr_id"], "repo": r["repo"], "fact_count": r["fact_count"]} for r in rows]
+        return json.dumps(modules, indent=2)
 
+    # No filter — return compact repo summary instead of every module
+    rows = c.execute(
+        "SELECT repo, COUNT(DISTINCT pr_id) as modules, COUNT(*) as facts "
+        "FROM facts GROUP BY repo ORDER BY repo",
+    ).fetchall()
     if not rows:
         return "No modules found. Run 'testigo-recall scan' to populate the knowledge base."
-
-    modules = [{"module_id": r["pr_id"], "repo": r["repo"], "fact_count": r["fact_count"]} for r in rows]
-    return json.dumps(modules, indent=2)
+    repos = [{"repo": r["repo"], "modules": r["modules"], "facts": r["facts"]} for r in rows]
+    return json.dumps(repos, indent=2)
 
 
 def main() -> None:
