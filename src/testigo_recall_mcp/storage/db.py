@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence REAL NOT NULL,
     source TEXT NOT NULL DEFAULT 'ai',
     source_files TEXT NOT NULL DEFAULT '[]',
+    symbols TEXT NOT NULL DEFAULT '[]',
     FOREIGN KEY (pr_id, repo) REFERENCES pr_analyses(pr_id, repo)
 );
 
@@ -75,6 +76,15 @@ class Database:
         self._conn = sqlite3.connect(str(self._path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns that may be missing in older databases."""
+        c = self._conn.cursor()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(facts)").fetchall()}
+        if "symbols" not in cols:
+            c.execute("ALTER TABLE facts ADD COLUMN symbols TEXT NOT NULL DEFAULT '[]'")
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -107,13 +117,14 @@ class Database:
 
         for fact in analysis.facts:
             c.execute(
-                "INSERT INTO facts (pr_id, repo, category, summary, detail, confidence, source, source_files) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO facts (pr_id, repo, category, summary, detail, confidence, source, source_files, symbols) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     analysis.pr_id, analysis.repo,
                     fact.category, fact.summary, fact.detail,
                     fact.confidence, fact.source,
                     json.dumps(fact.files),
+                    json.dumps(fact.symbols),
                 ),
             )
 
@@ -147,6 +158,7 @@ class Database:
                 confidence=r["confidence"],
                 source=r["source"],
                 files=json.loads(r["source_files"]) if r["source_files"] else [],
+                symbols=json.loads(r["symbols"]) if r["symbols"] else [],
             )
             for r in c.execute(
                 "SELECT * FROM facts WHERE pr_id = ? AND repo = ?", (pr_id_val, repo_val)
@@ -182,7 +194,7 @@ class Database:
         if category:
             rows = c.execute(
                 "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-                "f.confidence, f.source, f.source_files, p.timestamp "
+                "f.confidence, f.source, f.source_files, f.symbols, p.timestamp "
                 "FROM facts f "
                 "JOIN pr_analyses p ON f.pr_id = p.pr_id AND f.repo = p.repo "
                 "WHERE f.category = ? "
@@ -192,7 +204,7 @@ class Database:
         else:
             rows = c.execute(
                 "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-                "f.confidence, f.source, f.source_files, p.timestamp "
+                "f.confidence, f.source, f.source_files, f.symbols, p.timestamp "
                 "FROM facts f "
                 "JOIN pr_analyses p ON f.pr_id = p.pr_id AND f.repo = p.repo "
                 "ORDER BY p.timestamp DESC LIMIT ?",
@@ -205,7 +217,7 @@ class Database:
         c = self._conn.cursor()
         rows = c.execute(
             "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-            "f.confidence, f.source, f.source_files "
+            "f.confidence, f.source, f.source_files, f.symbols "
             "FROM facts f WHERE f.pr_id = ? "
             "ORDER BY f.category, f.confidence DESC",
             (pr_id,),
@@ -237,7 +249,7 @@ class Database:
         c = self._conn.cursor()
         query = (
             "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-            "f.confidence, f.source, f.source_files, "
+            "f.confidence, f.source, f.source_files, f.symbols, "
             "pa.timestamp, "
             "bm25(facts_fts, 10.0, 5.0) AS relevance "
             "FROM facts_fts fts "
@@ -268,7 +280,7 @@ class Database:
         pattern = f"%{term}%"
         query = (
             "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-            "f.confidence, f.source, f.source_files, pa.timestamp "
+            "f.confidence, f.source, f.source_files, f.symbols, pa.timestamp "
             "FROM facts f "
             "JOIN pr_analyses pa ON pa.pr_id = f.pr_id AND pa.repo = f.repo "
             "WHERE (f.summary LIKE ? OR f.detail LIKE ?)"
@@ -294,4 +306,6 @@ class Database:
         d = dict(row)
         if "source_files" in d:
             d["source_files"] = json.loads(d["source_files"]) if d["source_files"] else []
+        if "symbols" in d:
+            d["symbols"] = json.loads(d["symbols"]) if d["symbols"] else []
         return d

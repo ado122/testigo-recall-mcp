@@ -17,6 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import sqlite3
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -39,7 +42,19 @@ mcp = FastMCP(
         "- All facts have pr_id starting with 'SCAN:' and describe the CURRENT state of the code.\n"
         "- Facts are refreshed automatically when PRs touch those files — the DB always "
         "reflects the latest merged code.\n"
-        "- Always check the 'timestamp' field. More recent = more reliable."
+        "- Always check the 'timestamp' field. More recent = more reliable.\n\n"
+        "EFFICIENT USAGE — follow this pattern to minimize token cost:\n"
+        "1. Start with list_modules to get the full map of what's scanned.\n"
+        "2. Use get_module_facts for targeted deep dives on specific modules — "
+        "it gives you everything about that module with zero noise.\n"
+        "3. Use search_codebase only for cross-module questions (max 1-2 broad searches). "
+        "Always use the category filter ('behavior', 'design', 'assumption') to reduce noise.\n"
+        "4. Use get_component_impact for blast-radius questions ('what depends on X?').\n"
+        "5. NEVER repeat similar searches with rephrased queries — trust the first result.\n"
+        "6. Facts include a 'symbols' array with function/class names for grep-based navigation. "
+        "Use these to jump directly to code instead of reading entire files.\n\n"
+        "Optimal workflow: list_modules -> get_module_facts on ~3-5 relevant modules -> done. "
+        "This costs ~7 calls. Avoid the anti-pattern of 8+ broad searches + 8+ file reads."
     ),
 )
 
@@ -86,30 +101,126 @@ def _sync_db_from_github(repo: str, db_path: Path) -> bool:
         return False
 
 
+def _collect_sources() -> list[Path]:
+    """Collect all DB sources from env vars.
+
+    Supports comma-separated values for multiple sources:
+      TESTIGO_RECALL_DB_PATH=local1.db,local2.db
+      TESTIGO_RECALL_REPO=org/repo-a,org/repo-b
+    """
+    sources: list[Path] = []
+
+    # Local DB paths (comma-separated)
+    local = os.environ.get("TESTIGO_RECALL_DB_PATH") or os.environ.get("PR_IMPACT_DB_PATH")
+    if local:
+        for p in local.split(","):
+            p = p.strip()
+            if p:
+                path = Path(p)
+                if path.exists():
+                    sources.append(path)
+                else:
+                    logger.warning("Local DB not found: %s", p)
+
+    # GitHub repos (comma-separated)
+    repos = os.environ.get("TESTIGO_RECALL_REPO") or os.environ.get("PR_IMPACT_REPO")
+    if repos:
+        for repo in repos.split(","):
+            repo = repo.strip()
+            if not repo:
+                continue
+            db_path = Path.home() / ".testigo-recall" / repo.replace("/", "--") / "knowledge-base.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+
+            logger.info("Syncing knowledge base from %s ...", repo)
+            if _sync_db_from_github(repo, db_path):
+                logger.info("Knowledge base synced to %s", db_path)
+                sources.append(db_path)
+            elif db_path.exists():
+                logger.info("Using cached knowledge base at %s", db_path)
+                sources.append(db_path)
+            else:
+                logger.warning("No knowledge base available for %s", repo)
+
+    return sources
+
+
+def _merge_into(target: sqlite3.Connection, source_path: Path) -> int:
+    """Merge all data from source DB into target. Returns facts merged."""
+    target.execute("ATTACH DATABASE ? AS src", (str(source_path),))
+
+    # Replace pr_analyses (natural PK handles conflicts)
+    target.execute(
+        "INSERT OR REPLACE INTO pr_analyses "
+        "SELECT * FROM src.pr_analyses"
+    )
+
+    # Clear facts/deps for modules we're importing (avoid duplicates)
+    target.execute(
+        "DELETE FROM facts WHERE EXISTS ("
+        "  SELECT 1 FROM src.pr_analyses s "
+        "  WHERE s.pr_id = facts.pr_id AND s.repo = facts.repo"
+        ")"
+    )
+    target.execute(
+        "DELETE FROM dependencies WHERE EXISTS ("
+        "  SELECT 1 FROM src.pr_analyses s "
+        "  WHERE s.pr_id = dependencies.pr_id AND s.repo = dependencies.repo"
+        ")"
+    )
+
+    # Insert facts (skip id — autoincrement + FTS triggers handle it)
+    count = target.execute(
+        "INSERT INTO facts (pr_id, repo, category, summary, detail, confidence, source, source_files, symbols) "
+        "SELECT pr_id, repo, category, summary, detail, confidence, source, source_files, "
+        "COALESCE(symbols, '[]') FROM src.facts"
+    ).rowcount
+
+    # Insert dependencies
+    target.execute(
+        "INSERT INTO dependencies (pr_id, repo, from_component, to_component, relation) "
+        "SELECT pr_id, repo, from_component, to_component, relation "
+        "FROM src.dependencies"
+    )
+
+    # Commit before detach — SQLite requires no open transactions
+    target.commit()
+    target.execute("DETACH DATABASE src")
+    return count
+
+
 def _resolve_db_path() -> str | None:
-    """Determine the DB path, auto-downloading from GitHub if configured."""
-    # Explicit path takes priority — no auto-download
-    explicit = os.environ.get("TESTIGO_RECALL_DB_PATH") or os.environ.get("PR_IMPACT_DB_PATH")
-    if explicit:
-        return explicit
+    """Determine the DB path, supporting multiple sources.
 
-    # If a GitHub repo is configured, auto-download
-    repo = os.environ.get("TESTIGO_RECALL_REPO") or os.environ.get("PR_IMPACT_REPO")
-    if repo:
-        db_path = Path.home() / ".testigo-recall" / repo.replace("/", "--") / "knowledge-base.db"
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+    If only one source exists, it's used directly.
+    If multiple sources exist, they're merged into a temp DB.
+    """
+    sources = _collect_sources()
 
-        logger.info("Syncing knowledge base from %s ...", repo)
-        if _sync_db_from_github(repo, db_path):
-            logger.info("Knowledge base synced to %s", db_path)
-        elif db_path.exists():
-            logger.info("Using cached knowledge base at %s", db_path)
-        else:
-            logger.warning("No knowledge base available for %s", repo)
+    if not sources:
+        return None
 
-        return str(db_path)
+    if len(sources) == 1:
+        return str(sources[0])
 
-    return None
+    # Multiple sources — merge into a temp DB
+    merged_path = Path(tempfile.gettempdir()) / "testigo-recall-merged.db"
+
+    # Copy first source as base (preserves schema + FTS)
+    shutil.copy2(sources[0], merged_path)
+    logger.info("Base DB: %s", sources[0])
+
+    conn = sqlite3.connect(str(merged_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        for src in sources[1:]:
+            count = _merge_into(conn, src)
+            logger.info("Merged %d facts from %s", count, src)
+    finally:
+        conn.close()
+
+    logger.info("Merged %d sources into %s", len(sources), merged_path)
+    return str(merged_path)
 
 
 def _get_db() -> Database:
