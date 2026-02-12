@@ -174,19 +174,36 @@ class Database:
             facts=facts,
         )
 
+    # Stdlib / framework modules that add noise to dependency graphs
+    _STDLIB_DEPS = frozenset({
+        "json", "re", "os", "sys", "typing", "pathlib", "logging", "time",
+        "datetime", "collections", "functools", "itertools", "enum", "abc",
+        "dataclasses", "copy", "math", "hashlib", "base64", "traceback",
+        "urllib", "http", "io", "contextlib", "asyncio", "threading",
+        "fastapi", "pydantic", "express", "react", "vue", "next",
+        "axios", "lodash", "mongoose", "sequelize",
+    })
+
     def get_component_impact(self, component: str) -> list[dict]:
         """Find all PRs where a component appears in dependencies."""
         # Strip common extensions so "scanner.py" matches "scanner"
         stem = component.rsplit(".", 1)[0] if "." in component else component
-        # Also match partial paths: "scanner" matches "testigo_recall.scanner"
-        pattern = f"%{stem}%"
+        # Escape SQL LIKE wildcards in the stem (% and _)
+        escaped = stem.replace("%", r"\%").replace("_", r"\_")
+        pattern = f"%{escaped}%"
         c = self._conn.cursor()
         rows = c.execute(
             "SELECT DISTINCT pr_id, repo, from_component, to_component, relation "
-            "FROM dependencies WHERE from_component LIKE ? OR to_component LIKE ?",
+            "FROM dependencies WHERE from_component LIKE ? ESCAPE '\\' "
+            "OR to_component LIKE ? ESCAPE '\\'",
             (pattern, pattern),
         ).fetchall()
-        return [dict(r) for r in rows]
+        # Filter out stdlib/framework noise
+        return [
+            dict(r) for r in rows
+            if r["from_component"] not in self._STDLIB_DEPS
+            and r["to_component"] not in self._STDLIB_DEPS
+        ]
 
     def get_recent_facts(self, category: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent facts, optionally filtered by category."""
