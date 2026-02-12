@@ -30,75 +30,80 @@ from testigo_recall_mcp.storage.db import Database
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
-    "testigo-recall",
-    instructions=(
-        "You have access to a pre-scanned codebase knowledge base. "
-        "Use search_codebase to find facts about behaviors, design decisions, "
-        "and assumptions. Use get_module_facts for deep dives into specific modules. "
-        "Always search the knowledge base BEFORE reading source files — it's faster "
-        "and cheaper.\n\n"
-        "IMPORTANT — interpreting results:\n"
-        "- All facts have pr_id starting with 'SCAN:' and describe the CURRENT state of the code.\n"
-        "- Facts are refreshed automatically when PRs touch those files — the DB always "
-        "reflects the latest merged code.\n"
-        "- Always check the 'timestamp' field. More recent = more reliable.\n\n"
-        "EFFICIENT USAGE — follow this pattern to minimize token cost:\n"
-        "1. Start with list_modules to get the full map of what's scanned.\n"
-        "2. Use get_module_facts for targeted deep dives on specific modules — "
-        "it gives you everything about that module with zero noise.\n"
-        "3. Use search_codebase only for cross-module questions (max 1-2 broad searches). "
-        "Always use the category filter ('behavior', 'design', 'assumption') to reduce noise.\n"
-        "4. Use get_component_impact for blast-radius questions ('what depends on X?').\n"
-        "5. NEVER repeat similar searches with rephrased queries — trust the first result.\n"
-        "6. Facts include a 'symbols' array with function/class names for grep-based navigation. "
-        "Use these to jump directly to code instead of reading entire files.\n\n"
-        "Optimal workflow: list_modules -> get_module_facts on ~3-5 relevant modules -> done. "
-        "This costs ~7 calls. Avoid the anti-pattern of 8+ broad searches + 8+ file reads."
-    ),
+_STATIC_INSTRUCTIONS = (
+    "You have access to a pre-scanned codebase knowledge base. "
+    "Use search_codebase to find facts about behaviors, design decisions, "
+    "and assumptions. Use get_module_facts for deep dives into specific modules. "
+    "Always search the knowledge base BEFORE reading source files — it's faster "
+    "and cheaper.\n\n"
+    "IMPORTANT — interpreting results:\n"
+    "- All facts have pr_id starting with 'SCAN:' and describe the CURRENT state of the code.\n"
+    "- Facts are refreshed automatically when PRs touch those files — the DB always "
+    "reflects the latest merged code.\n"
+    "- Always check the 'timestamp' field. More recent = more reliable.\n\n"
+    "EFFICIENT USAGE — follow this pattern to minimize token cost:\n"
+    "1. Start with list_modules to get the full map of what's scanned.\n"
+    "2. Use get_module_facts for targeted deep dives on specific modules — "
+    "it gives you everything about that module with zero noise.\n"
+    "3. Use search_codebase only for cross-module questions (max 1-2 broad searches). "
+    "Always use the category filter ('behavior', 'design', 'assumption') to reduce noise.\n"
+    "4. Use get_component_impact for blast-radius questions ('what depends on X?').\n"
+    "5. NEVER repeat similar searches with rephrased queries — trust the first result.\n"
+    "6. Facts include a 'symbols' array with function/class names for grep-based navigation. "
+    "Use these to jump directly to code instead of reading entire files.\n\n"
+    "Optimal workflow: list_modules -> get_module_facts on ~3-5 relevant modules -> done. "
+    "This costs ~7 calls. Avoid the anti-pattern of 8+ broad searches + 8+ file reads."
 )
 
 _db: Database | None = None
 
 
-def _sync_db_from_github(repo: str, db_path: Path) -> bool:
-    """Download the latest knowledge base from a GitHub release.
+def _sync_db_from_github(repo: str, cache_dir: Path) -> list[Path]:
+    """Download all .db assets from a GitHub release.
 
     Uses the GitHub API directly — no external tools required.
     Public repos work without auth. Private repos need GITHUB_TOKEN
     or GH_TOKEN environment variable.
 
-    Returns True if download succeeded.
+    Returns list of downloaded file paths (empty on failure).
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    headers = {"Accept": "application/octet-stream"}
+    dl_headers = {"Accept": "application/octet-stream"}
     if token:
-        headers["Authorization"] = f"token {token}"
+        dl_headers["Authorization"] = f"token {token}"
 
     try:
-        # Step 1: Find the asset URL via the GitHub API
+        # Step 1: Find all .db assets via the GitHub API
         api_url = f"https://api.github.com/repos/{repo}/releases/tags/knowledge-base"
         api_headers = {"Authorization": f"token {token}"} if token else {}
         req = urllib.request.Request(api_url, headers=api_headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             release = json.loads(resp.read())
 
-        asset = next((a for a in release.get("assets", []) if a["name"] == "impact-history.db"), None)
-        if not asset:
-            logger.warning("No impact-history.db asset in release for %s", repo)
-            return False
+        db_assets = [a for a in release.get("assets", []) if a["name"].endswith(".db")]
+        if not db_assets:
+            logger.warning("No .db assets in release for %s", repo)
+            return []
 
-        # Step 2: Download the asset binary
-        req = urllib.request.Request(asset["url"], headers=headers)
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            db_path.write_bytes(resp.read())
-        return True
+        # Step 2: Download each asset
+        paths: list[Path] = []
+        for asset in db_assets:
+            db_path = cache_dir / asset["name"]
+            try:
+                req = urllib.request.Request(asset["url"], headers=dl_headers)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    db_path.write_bytes(resp.read())
+                logger.info("Downloaded %s from %s", asset["name"], repo)
+                paths.append(db_path)
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError) as e:
+                logger.warning("Failed to download %s from %s: %s", asset["name"], repo, e)
+        return paths
     except urllib.error.HTTPError as e:
-        logger.warning("Could not download DB from %s: HTTP %d", repo, e.code)
-        return False
+        logger.warning("Could not access release for %s: HTTP %d", repo, e.code)
+        return []
     except (urllib.error.URLError, OSError, TimeoutError) as e:
-        logger.warning("Could not download DB from %s: %s", repo, e)
-        return False
+        logger.warning("Could not access release for %s: %s", repo, e)
+        return []
 
 
 def _collect_sources() -> list[Path]:
@@ -129,18 +134,21 @@ def _collect_sources() -> list[Path]:
             repo = repo.strip()
             if not repo:
                 continue
-            db_path = Path.home() / ".testigo-recall" / repo.replace("/", "--") / "knowledge-base.db"
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_dir = Path.home() / ".testigo-recall" / repo.replace("/", "--")
+            cache_dir.mkdir(parents=True, exist_ok=True)
 
             logger.info("Syncing knowledge base from %s ...", repo)
-            if _sync_db_from_github(repo, db_path):
-                logger.info("Knowledge base synced to %s", db_path)
-                sources.append(db_path)
-            elif db_path.exists():
-                logger.info("Using cached knowledge base at %s", db_path)
-                sources.append(db_path)
+            downloaded = _sync_db_from_github(repo, cache_dir)
+            if downloaded:
+                sources.extend(downloaded)
             else:
-                logger.warning("No knowledge base available for %s", repo)
+                # Fallback: use any cached .db files in the directory
+                cached = sorted(cache_dir.glob("*.db"))
+                if cached:
+                    logger.info("Using %d cached DB(s) from %s", len(cached), cache_dir)
+                    sources.extend(cached)
+                else:
+                    logger.warning("No knowledge base available for %s", repo)
 
     return sources
 
@@ -185,6 +193,15 @@ def _merge_into(target: sqlite3.Connection, source_path: Path) -> int:
         "SELECT pr_id, repo, from_component, to_component, relation "
         "FROM src.dependencies"
     )
+
+    # Merge repo summaries (newer wins)
+    try:
+        target.execute(
+            "INSERT OR REPLACE INTO repo_summaries "
+            "SELECT * FROM src.repo_summaries"
+        )
+    except sqlite3.OperationalError:
+        pass  # Source DB may not have repo_summaries table yet
 
     # Commit before detach — SQLite requires no open transactions
     target.commit()
@@ -232,6 +249,41 @@ def _get_db() -> Database:
     if _db is None:
         _db = Database(_resolve_db_path())
     return _db
+
+
+def _build_catalog() -> str:
+    """Build repo catalog string from DB summaries.
+
+    Called at module level to inject into FastMCP instructions.
+    Returns empty string if no summaries exist yet.
+    """
+    try:
+        db = _get_db()
+        summaries = db.get_repo_summaries()
+        if not summaries:
+            return ""
+        lines = []
+        c = db._conn.cursor()
+        for s in summaries:
+            row = c.execute(
+                "SELECT COUNT(*) as cnt FROM facts WHERE repo = ?",
+                (s["repo"],),
+            ).fetchone()
+            count = row["cnt"] if row else 0
+            lines.append(f"- {s['repo']} ({count} facts): {s['summary']}")
+        return (
+            "\n\nAVAILABLE REPOSITORIES:\n"
+            + "\n".join(lines)
+            + "\nUse this catalog to decide which repo to search for a given question."
+        )
+    except Exception:
+        return ""
+
+
+mcp = FastMCP(
+    "testigo-recall",
+    instructions=_STATIC_INSTRUCTIONS + _build_catalog(),
+)
 
 
 @mcp.tool()
@@ -350,7 +402,24 @@ def list_modules(repo_name: str | None = None) -> str:
     ).fetchall()
     if not rows:
         return "No modules found. Run 'testigo-recall scan' to populate the knowledge base."
-    repos = [{"repo": r["repo"], "modules": r["modules"], "facts": r["facts"]} for r in rows]
+
+    # Include repo summaries if available
+    summaries_map: dict[str, str] = {}
+    try:
+        for s in db.get_repo_summaries():
+            summaries_map[s["repo"]] = s["summary"]
+    except Exception:
+        pass
+
+    repos = [
+        {
+            "repo": r["repo"],
+            "modules": r["modules"],
+            "facts": r["facts"],
+            **({"summary": summaries_map[r["repo"]]} if r["repo"] in summaries_map else {}),
+        }
+        for r in rows
+    ]
     return json.dumps(repos, indent=2)
 
 

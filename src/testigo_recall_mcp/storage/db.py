@@ -66,6 +66,12 @@ CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
     INSERT INTO facts_fts(facts_fts, rowid, summary, detail)
     VALUES ('delete', old.id, old.summary, old.detail);
 END;
+
+CREATE TABLE IF NOT EXISTS repo_summaries (
+    repo TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -88,6 +94,13 @@ class Database:
 
     def close(self) -> None:
         self._conn.close()
+
+    def get_repo_summaries(self) -> list[dict]:
+        """Get all repo summaries."""
+        rows = self._conn.execute(
+            "SELECT repo, summary, updated_at FROM repo_summaries ORDER BY repo"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_analysis(self, analysis: PRAnalysis) -> None:
         """Save or replace a PR analysis."""
