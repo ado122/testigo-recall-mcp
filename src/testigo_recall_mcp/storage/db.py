@@ -260,6 +260,7 @@ class Database:
         category: str | None = None,
         min_confidence: float = 0.0,
         limit: int = 50,
+        repo_name: str | None = None,
     ) -> list[dict]:
         """Full-text search across all facts with BM25 ranking."""
         words = term.split()
@@ -268,12 +269,13 @@ class Database:
         fts_query = " OR ".join(f'"{w}"' for w in words)
 
         try:
-            return self._fts_search(fts_query, category, min_confidence, limit)
+            return self._fts_search(fts_query, category, min_confidence, limit, repo_name)
         except sqlite3.OperationalError:
-            return self._like_search(term, category, min_confidence, limit)
+            return self._like_search(term, category, min_confidence, limit, repo_name)
 
     def _fts_search(
         self, fts_query: str, category: str | None, min_confidence: float, limit: int,
+        repo_name: str | None = None,
     ) -> list[dict]:
         """Search using FTS5 with BM25 relevance ranking."""
         c = self._conn.cursor()
@@ -289,6 +291,9 @@ class Database:
         )
         params: list = [fts_query]
 
+        if repo_name:
+            query += " AND f.repo = ?"
+            params.append(repo_name)
         if category:
             query += " AND f.category = ?"
             params.append(category)
@@ -304,6 +309,7 @@ class Database:
 
     def _like_search(
         self, term: str, category: str | None, min_confidence: float, limit: int,
+        repo_name: str | None = None,
     ) -> list[dict]:
         """Fallback search using LIKE patterns."""
         c = self._conn.cursor()
@@ -317,6 +323,9 @@ class Database:
         )
         params: list = [pattern, pattern]
 
+        if repo_name:
+            query += " AND f.repo = ?"
+            params.append(repo_name)
         if category:
             query += " AND f.category = ?"
             params.append(category)

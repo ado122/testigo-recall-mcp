@@ -292,6 +292,7 @@ def search_codebase(
     category: str | None = None,
     min_confidence: float = 0.0,
     limit: int = 20,
+    repo_name: str | None = None,
 ) -> str:
     """Search the codebase knowledge base for facts about what the code does,
     how it's built, and what it assumes.
@@ -304,9 +305,10 @@ def search_codebase(
         category: Optional filter — "behavior" (what it does), "design" (how it's built), or "assumption" (what it expects)
         min_confidence: Minimum confidence threshold 0.0-1.0 (default: 0.0)
         limit: Max results to return (default: 20)
+        repo_name: Optional filter to scope search to a specific repository
     """
     db = _get_db()
-    results = db.search(query, category=category, min_confidence=min_confidence, limit=limit)
+    results = db.search(query, category=category, min_confidence=min_confidence, limit=limit, repo_name=repo_name)
     if not results:
         return f"No facts found for '{query}'. Try broader keywords or remove the category filter."
     return json.dumps(results, indent=2)
