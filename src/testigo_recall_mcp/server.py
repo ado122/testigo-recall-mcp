@@ -307,6 +307,10 @@ def search_codebase(
         limit: Max results to return (default: 20)
         repo_name: Optional filter to scope search to a specific repository
     """
+    # Input validation
+    limit = max(1, min(limit, 100))
+    min_confidence = max(0.0, min(min_confidence, 1.0))
+
     db = _get_db()
     results = db.search(query, category=category, min_confidence=min_confidence, limit=limit, repo_name=repo_name)
     if not results:
@@ -346,9 +350,17 @@ def get_recent_changes(
         category: Optional filter — "behavior", "design", or "assumption"
         limit: Number of recent facts to return (default: 10)
     """
+    # Input validation
+    limit = max(1, min(limit, 100))
+    valid_categories = {"behavior", "design", "assumption"}
+    if category and category not in valid_categories:
+        return f"Invalid category '{category}'. Must be one of: {', '.join(sorted(valid_categories))}."
+
     db = _get_db()
     facts = db.get_recent_facts(category=category, limit=limit)
     if not facts:
+        if category:
+            return f"No facts found for category '{category}'."
         return "No facts in the knowledge base yet. Run 'testigo-recall scan' first."
     return json.dumps(facts, indent=2)
 
@@ -363,6 +375,10 @@ def get_component_impact(component_name: str) -> str:
     Args:
         component_name: File path or service name (e.g. "api_service.py", "backend/app/auth")
     """
+    # Input validation
+    if not component_name or not component_name.strip():
+        return "component_name is required. Provide a file path or service name (e.g. 'api_service.py', 'backend/app/auth')."
+
     db = _get_db()
     impacts = db.get_component_impact(component_name)
     if not impacts:
