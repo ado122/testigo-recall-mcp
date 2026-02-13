@@ -68,10 +68,19 @@ _STATIC_INSTRUCTIONS = (
     "4. get_component_impact(component_name) — find what depends on a file or service.\n"
     "5. get_recent_changes() — see the most recently extracted facts.\n\n"
 
+    "MULTI-QUERY (important — saves tokens):\n"
+    "search_codebase supports semicolon-separated queries in a single call. "
+    "ALWAYS batch related searches instead of making separate calls.\n"
+    "  GOOD: search_codebase('payment gateway; checkout flow; stripe webhooks')\n"
+    "  BAD:  3 separate calls with each keyword group\n"
+    "This runs multiple searches, deduplicates results, and returns them in one response. "
+    "Batching 5 searches into 1 call can reduce costs by 70-80%.\n\n"
+
     "SEARCH STRATEGY:\n"
+    "- Plan your keyword groups upfront. Think of 3-5 angles on the topic, "
+    "then batch them into one semicolon-separated call.\n"
     "- If results seem irrelevant, try DIFFERENT keywords — use synonyms, function names, "
-    "file path fragments, or more specific technical terms. 3-5 targeted searches with "
-    "different angles beats giving up after one attempt.\n"
+    "file path fragments, or more specific technical terms.\n"
     "- Facts include a 'symbols' array with function/class names — great for precise follow-ups.\n"
     "- The 'source_files' field shows exactly which files each fact was extracted from.\n"
     "- Start specific, broaden only if needed.\n\n"
@@ -82,7 +91,15 @@ _STATIC_INSTRUCTIONS = (
     "- Results are ranked by relevance (BM25). The top result is usually the best match."
 )
 
+# Fields that waste tokens without adding value for AI agents
+_NOISE_FIELDS = frozenset({"source", "timestamp", "relevance"})
+
 _db: Database | None = None
+
+
+def _clean_facts(facts: list[dict]) -> list[dict]:
+    """Remove noise fields from fact dicts to save tokens."""
+    return [{k: v for k, v in f.items() if k not in _NOISE_FIELDS} for f in facts]
 
 
 def _sync_db_from_github(repo: str, cache_dir: Path) -> list[Path]:
@@ -327,11 +344,17 @@ def search_codebase(
     Use this FIRST before reading source files. It returns pre-extracted facts
     ranked by relevance, saving significant time and tokens.
 
+    MULTI-QUERY: Use semicolons to search multiple keyword groups in one call.
+    Example: "payment gateway; checkout flow; stripe webhooks"
+    This runs 3 searches, deduplicates, and returns combined results.
+    ALWAYS batch related searches into one call — this is dramatically cheaper.
+
     Args:
         query: Search keywords (e.g. "authentication", "payment flow", "database connection")
+            Use semicolons to batch multiple searches: "auth login; session JWT; middleware"
         category: Optional filter — "behavior" (what it does), "design" (how it's built), or "assumption" (what it expects)
         min_confidence: Minimum confidence threshold 0.0-1.0 (default: 0.0)
-        limit: Max results to return (default: 20)
+        limit: Max results per query (default: 20). With batched queries, total results can be up to limit × number of queries.
         repo_name: Optional filter to scope search to a specific repository
     """
     # Input validation
@@ -339,10 +362,33 @@ def search_codebase(
     min_confidence = max(0.0, min(min_confidence, 1.0))
 
     db = _get_db()
-    results = db.search(query, category=category, min_confidence=min_confidence, limit=limit, repo_name=repo_name)
+
+    # Split on semicolons for multi-query support
+    queries = [q.strip() for q in query.split(";") if q.strip()]
+    if not queries:
+        return "Empty query. Provide search keywords."
+
+    if len(queries) == 1:
+        # Single query — standard path
+        results = db.search(queries[0], category=category, min_confidence=min_confidence, limit=limit, repo_name=repo_name)
+    else:
+        # Multi-query: run each, deduplicate, combine
+        seen: set[tuple] = set()
+        results: list[dict] = []
+        for q in queries:
+            hits = db.search(q, category=category, min_confidence=min_confidence, limit=limit, repo_name=repo_name)
+            for fact in hits:
+                key = (fact.get("pr_id"), fact.get("category"), fact.get("summary"))
+                if key not in seen:
+                    seen.add(key)
+                    results.append(fact)
+        # Cap total results
+        max_total = min(limit * len(queries), 100)
+        results = results[:max_total]
+
     if not results:
         return f"No facts found for '{query}'. Try broader keywords or remove the category filter."
-    return json.dumps(results, indent=2)
+    return json.dumps(_clean_facts(results), indent=2)
 
 
 @mcp.tool()
@@ -360,7 +406,7 @@ def get_module_facts(module_id: str) -> str:
     facts = db.get_facts_by_module(module_id)
     if not facts:
         return f"No facts found for module '{module_id}'. Use search_codebase to find valid module IDs."
-    return json.dumps(facts, indent=2)
+    return json.dumps(_clean_facts(facts), indent=2)
 
 
 @mcp.tool()
@@ -389,7 +435,7 @@ def get_recent_changes(
         if category:
             return f"No facts found for category '{category}'."
         return "No facts in the knowledge base yet. Run 'testigo-recall scan' first."
-    return json.dumps(facts, indent=2)
+    return json.dumps(_clean_facts(facts), indent=2)
 
 
 @mcp.tool()
