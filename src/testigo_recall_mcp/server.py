@@ -388,7 +388,7 @@ def search_codebase(
 
     if not results:
         return f"No facts found for '{query}'. Try broader keywords or remove the category filter."
-    return json.dumps(_clean_facts(results), indent=2)
+    return json.dumps(_clean_facts(results))
 
 
 @mcp.tool()
@@ -406,7 +406,7 @@ def get_module_facts(module_id: str) -> str:
     facts = db.get_facts_by_module(module_id)
     if not facts:
         return f"No facts found for module '{module_id}'. Use search_codebase to find valid module IDs."
-    return json.dumps(_clean_facts(facts), indent=2)
+    return json.dumps(_clean_facts(facts))
 
 
 @mcp.tool()
@@ -435,7 +435,7 @@ def get_recent_changes(
         if category:
             return f"No facts found for category '{category}'."
         return "No facts in the knowledge base yet. Run 'testigo-recall scan' first."
-    return json.dumps(_clean_facts(facts), indent=2)
+    return json.dumps(_clean_facts(facts))
 
 
 @mcp.tool()
@@ -456,7 +456,7 @@ def get_component_impact(component_name: str) -> str:
     impacts = db.get_component_impact(component_name)
     if not impacts:
         return f"No dependency data found for '{component_name}'. Try a shorter name or file path."
-    return json.dumps(impacts, indent=2)
+    return json.dumps(impacts)
 
 
 @mcp.tool()
@@ -484,7 +484,7 @@ def list_modules(repo_name: str | None = None) -> str:
         if not rows:
             return f"No modules found for repo '{repo_name}'."
         modules = [{"module_id": r["pr_id"], "repo": r["repo"], "fact_count": r["fact_count"]} for r in rows]
-        return json.dumps(modules, indent=2)
+        return json.dumps(modules)
 
     # No filter — return compact repo summary instead of every module
     rows = c.execute(
@@ -511,7 +511,7 @@ def list_modules(repo_name: str | None = None) -> str:
         }
         for r in rows
     ]
-    return json.dumps(repos, indent=2)
+    return json.dumps(repos)
 
 
 def main() -> None:
