@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -115,6 +116,63 @@ _db: Database | None = None
 def _clean_facts(facts: list[dict]) -> list[dict]:
     """Remove noise fields from fact dicts to save tokens."""
     return [{k: v for k, v in f.items() if k not in _NOISE_FIELDS} for f in facts]
+
+
+# Tokens stripped before word-overlap comparison (country/locale names)
+_COUNTRY_TOKENS = frozenset({
+    "cz", "sk", "pl", "ro", "it", "hu", "en",
+    "czech", "slovak", "polish", "romanian", "italian", "hungarian",
+    "cz-drmax", "sk-drmax", "pl-drmax", "ro-drmax", "it-drmax", "hu-drmax",
+    "pl-apteka", "pl-drogeria", "pl2-drmax",
+})
+
+_WORD_RE = re.compile(r"[a-z0-9_]+")
+
+
+def _normalize_for_dedup(text: str) -> frozenset[str]:
+    """Extract word set from text, stripping country-specific tokens."""
+    words = set(_WORD_RE.findall(text.lower()))
+    return frozenset(words - _COUNTRY_TOKENS)
+
+
+def _dedup_similar_facts(facts: list[dict]) -> list[dict]:
+    """Group near-duplicate facts, keeping first occurrence.
+
+    Two facts are considered duplicates when:
+    - They belong to the same repo
+    - Their summaries share >75% word overlap (after stripping country tokens)
+
+    This collapses per-country config repetition (same setting x6 countries)
+    without touching cross-repo facts that happen to be similar.
+    """
+    result: list[dict] = []
+    # (repo, word_set) -> index in result
+    seen: list[tuple[str, frozenset[str], int]] = []
+
+    for fact in facts:
+        repo = fact.get("repo", "")
+        summary_words = _normalize_for_dedup(fact.get("summary", ""))
+        if not summary_words:
+            result.append(fact)
+            continue
+
+        merged = False
+        for seen_repo, seen_words, _idx in seen:
+            if repo != seen_repo:
+                continue
+            union = len(summary_words | seen_words)
+            if union == 0:
+                continue
+            overlap = len(summary_words & seen_words) / union
+            if overlap > 0.75:
+                merged = True
+                break
+
+        if not merged:
+            seen.append((repo, summary_words, len(result)))
+            result.append(fact)
+
+    return result
 
 
 def _sync_db_from_github(repo: str, cache_dir: Path) -> list[Path]:
@@ -302,6 +360,18 @@ def _resolve_db_path() -> str | None:
 
     conn = sqlite3.connect(str(merged_path))
     conn.row_factory = sqlite3.Row
+    # Ensure repo_dependencies table exists (base DB may predate this feature)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS repo_dependencies ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_repo TEXT NOT NULL, "
+        "to_repo TEXT NOT NULL, "
+        "manifest TEXT, "
+        "raw_import TEXT, "
+        "relation TEXT DEFAULT 'depends_on', "
+        "UNIQUE(from_repo, to_repo, raw_import))"
+    )
+    conn.commit()
     try:
         for src in sources[1:]:
             count = _merge_into(conn, src)
@@ -414,6 +484,10 @@ def search_codebase(
 
     if not results:
         return f"No facts found for '{query}'. Try broader keywords or remove the category filter."
+
+    # Collapse near-duplicate facts (e.g. same config across country layers)
+    results = _dedup_similar_facts(results)
+
     return json.dumps(_clean_facts(results))
 
 
