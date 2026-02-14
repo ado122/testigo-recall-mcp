@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
     summary,
     detail,
+    symbols,
     content=facts,
     content_rowid=id,
     tokenize='porter unicode61'
@@ -58,13 +59,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
 
 -- Triggers to keep FTS in sync with facts table
 CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
-    INSERT INTO facts_fts(rowid, summary, detail)
-    VALUES (new.id, new.summary, new.detail);
+    INSERT INTO facts_fts(rowid, summary, detail, symbols)
+    VALUES (new.id, new.summary, new.detail, new.symbols);
 END;
 
 CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
-    INSERT INTO facts_fts(facts_fts, rowid, summary, detail)
-    VALUES ('delete', old.id, old.summary, old.detail);
+    INSERT INTO facts_fts(facts_fts, rowid, summary, detail, symbols)
+    VALUES ('delete', old.id, old.summary, old.detail, old.symbols);
 END;
 
 CREATE TABLE IF NOT EXISTS repo_summaries (
@@ -85,11 +86,28 @@ class Database:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Add columns that may be missing in older databases."""
+        """Add columns/indexes that may be missing in older databases."""
         c = self._conn.cursor()
         cols = {r[1] for r in c.execute("PRAGMA table_info(facts)").fetchall()}
         if "symbols" not in cols:
             c.execute("ALTER TABLE facts ADD COLUMN symbols TEXT NOT NULL DEFAULT '[]'")
+            self._conn.commit()
+
+        # Rebuild FTS5 index if it's missing the symbols column
+        row = c.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='facts_fts'"
+        ).fetchone()
+        if row and "symbols" not in (row[0] or ""):
+            c.executescript("""
+                DROP TRIGGER IF EXISTS facts_ai;
+                DROP TRIGGER IF EXISTS facts_ad;
+                DROP TABLE IF EXISTS facts_fts;
+            """)
+            self._conn.executescript(_SCHEMA)
+            c.execute(
+                "INSERT INTO facts_fts(rowid, summary, detail, symbols) "
+                "SELECT id, summary, detail, symbols FROM facts"
+            )
             self._conn.commit()
 
     def close(self) -> None:
@@ -283,7 +301,7 @@ class Database:
             "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
             "f.confidence, f.source, f.source_files, f.symbols, "
             "pa.timestamp, "
-            "bm25(facts_fts, 10.0, 5.0) AS relevance "
+            "bm25(facts_fts, 10.0, 5.0, 15.0) AS relevance "
             "FROM facts_fts fts "
             "JOIN facts f ON f.id = fts.rowid "
             "JOIN pr_analyses pa ON pa.pr_id = f.pr_id AND pa.repo = f.repo "
