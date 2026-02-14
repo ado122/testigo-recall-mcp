@@ -73,6 +73,16 @@ CREATE TABLE IF NOT EXISTS repo_summaries (
     summary TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS repo_dependencies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_repo TEXT NOT NULL,
+    to_repo TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    raw_import TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT 'depends_on',
+    UNIQUE(from_repo, to_repo, manifest, raw_import)
+);
 """
 
 
@@ -108,6 +118,24 @@ class Database:
                 "INSERT INTO facts_fts(rowid, summary, detail, symbols) "
                 "SELECT id, summary, detail, symbols FROM facts"
             )
+            self._conn.commit()
+
+        # Add repo_dependencies table if missing (older DBs)
+        tables = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "repo_dependencies" not in tables:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS repo_dependencies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_repo TEXT NOT NULL,
+                    to_repo TEXT NOT NULL,
+                    manifest TEXT NOT NULL,
+                    raw_import TEXT NOT NULL,
+                    relation TEXT NOT NULL DEFAULT 'depends_on',
+                    UNIQUE(from_repo, to_repo, manifest, raw_import)
+                );
+            """)
             self._conn.commit()
 
     def close(self) -> None:
@@ -356,6 +384,41 @@ class Database:
 
         rows = c.execute(query, params).fetchall()
         return [self._format_fact_row(r) for r in rows]
+
+    def get_repo_dependencies(
+        self, repo_name: str | None = None, direction: str = "both",
+    ) -> list[dict]:
+        """Get cross-repo dependencies.
+
+        Args:
+            repo_name: Filter to a specific repo. None returns all.
+            direction: 'outgoing', 'incoming', or 'both'.
+        """
+        c = self._conn.cursor()
+        if repo_name is None:
+            rows = c.execute(
+                "SELECT from_repo, to_repo, manifest, raw_import, relation "
+                "FROM repo_dependencies ORDER BY from_repo, to_repo"
+            ).fetchall()
+        elif direction == "outgoing":
+            rows = c.execute(
+                "SELECT from_repo, to_repo, manifest, raw_import, relation "
+                "FROM repo_dependencies WHERE from_repo = ?",
+                (repo_name,),
+            ).fetchall()
+        elif direction == "incoming":
+            rows = c.execute(
+                "SELECT from_repo, to_repo, manifest, raw_import, relation "
+                "FROM repo_dependencies WHERE to_repo = ?",
+                (repo_name,),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT from_repo, to_repo, manifest, raw_import, relation "
+                "FROM repo_dependencies WHERE from_repo = ? OR to_repo = ?",
+                (repo_name, repo_name),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     @staticmethod
     def _format_fact_row(row: sqlite3.Row) -> dict:

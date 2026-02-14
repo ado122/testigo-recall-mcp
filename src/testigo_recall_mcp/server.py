@@ -66,7 +66,9 @@ _STATIC_INSTRUCTIONS = (
     "3. get_module_facts(module_id) — deep dive into one module. "
     "Get module IDs from search results (the pr_id field, e.g. 'SCAN:layers/checkout').\n"
     "4. get_component_impact(component_name) — find what depends on a file or service.\n"
-    "5. get_recent_changes() — see the most recently extracted facts.\n\n"
+    "5. get_recent_changes() — see the most recently extracted facts.\n"
+    "6. get_repo_dependencies(repo_name, direction) — cross-repo dependency graph from package manifests. "
+    "Use direction='outgoing' to see what a repo depends on, 'incoming' to see what depends on it.\n\n"
 
     "MULTI-QUERY (important — saves tokens):\n"
     "search_codebase supports semicolon-separated queries in a single call. "
@@ -246,6 +248,17 @@ def _merge_into(target: sqlite3.Connection, source_path: Path) -> int:
         )
     except sqlite3.OperationalError:
         pass  # Source DB may not have repo_summaries table yet
+
+    # Merge repo dependencies
+    try:
+        target.execute(
+            "INSERT OR IGNORE INTO repo_dependencies "
+            "(from_repo, to_repo, manifest, raw_import, relation) "
+            "SELECT from_repo, to_repo, manifest, raw_import, relation "
+            "FROM src.repo_dependencies"
+        )
+    except sqlite3.OperationalError:
+        pass  # Source DB may not have repo_dependencies table yet
 
     # Commit before detach — SQLite requires no open transactions
     target.commit()
@@ -512,6 +525,34 @@ def list_modules(repo_name: str | None = None) -> str:
         for r in rows
     ]
     return json.dumps(repos)
+
+
+@mcp.tool()
+def get_repo_dependencies(
+    repo_name: str | None = None,
+    direction: str = "both",
+) -> str:
+    """Get cross-repo dependency graph showing which repos depend on each other.
+
+    Use this to understand the blast radius of changes across repositories.
+    Data comes from package manifests (go.mod, package.json), not code analysis.
+
+    Args:
+        repo_name: Filter to a specific repo. Without this, returns entire graph.
+        direction: "outgoing" (what this repo depends on), "incoming" (what depends on this repo), "both"
+    """
+    valid_directions = {"outgoing", "incoming", "both"}
+    if direction not in valid_directions:
+        return f"Invalid direction '{direction}'. Must be one of: {', '.join(sorted(valid_directions))}."
+
+    db = _get_db()
+    deps = db.get_repo_dependencies(repo_name=repo_name, direction=direction)
+    if not deps:
+        if repo_name:
+            return f"No cross-repo dependencies found for '{repo_name}'."
+        return "No cross-repo dependencies in the knowledge base. Run 'testigo-recall deps' to populate."
+
+    return json.dumps(deps)
 
 
 def main() -> None:
