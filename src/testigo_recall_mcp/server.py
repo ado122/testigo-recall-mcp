@@ -27,7 +27,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from testigo_recall_mcp.storage.db import Database
+from testigo_recall_mcp.storage.db import Database, _SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -283,6 +283,52 @@ def _collect_sources() -> list[Path]:
     return sources
 
 
+def _migrate_connection(conn: sqlite3.Connection) -> None:
+    """Bring a raw connection's schema up-to-date (symbols col, FTS, repo_dependencies)."""
+    c = conn.cursor()
+
+    # Add symbols column if missing
+    cols = {r[1] for r in c.execute("PRAGMA table_info(facts)").fetchall()}
+    if "symbols" not in cols:
+        c.execute("ALTER TABLE facts ADD COLUMN symbols TEXT NOT NULL DEFAULT '[]'")
+
+    # Rebuild FTS index if it's missing the symbols column
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='facts_fts'"
+    ).fetchone()
+    if row and "symbols" not in (row[0] or ""):
+        c.executescript("""
+            DROP TRIGGER IF EXISTS facts_ai;
+            DROP TRIGGER IF EXISTS facts_ad;
+            DROP TABLE IF EXISTS facts_fts;
+        """)
+        conn.executescript(_SCHEMA)
+        c.execute(
+            "INSERT INTO facts_fts(rowid, summary, detail, symbols) "
+            "SELECT id, summary, detail, symbols FROM facts"
+        )
+
+    # Ensure repo_dependencies table exists (base DB may predate this feature)
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS repo_dependencies ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "from_repo TEXT NOT NULL, "
+        "to_repo TEXT NOT NULL, "
+        "manifest TEXT, "
+        "raw_import TEXT, "
+        "relation TEXT DEFAULT 'depends_on', "
+        "UNIQUE(from_repo, to_repo, raw_import))"
+    )
+
+    # Ensure repo_summaries table exists
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS repo_summaries ("
+        "repo TEXT PRIMARY KEY, "
+        "summary TEXT NOT NULL, "
+        "updated_at TEXT NOT NULL)"
+    )
+
+
 def _merge_into(target: sqlite3.Connection, source_path: Path) -> int:
     """Merge all data from source DB into target. Returns facts merged."""
     target.execute("ATTACH DATABASE ? AS src", (str(source_path),))
@@ -373,17 +419,10 @@ def _resolve_db_path() -> str | None:
 
     conn = sqlite3.connect(str(merged_path))
     conn.row_factory = sqlite3.Row
-    # Ensure repo_dependencies table exists (base DB may predate this feature)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS repo_dependencies ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "from_repo TEXT NOT NULL, "
-        "to_repo TEXT NOT NULL, "
-        "manifest TEXT, "
-        "raw_import TEXT, "
-        "relation TEXT DEFAULT 'depends_on', "
-        "UNIQUE(from_repo, to_repo, raw_import))"
-    )
+
+    # Migrate base DB schema — the copied DB may predate newer columns/tables.
+    # Must run BEFORE merging so INSERT targets have all expected columns.
+    _migrate_connection(conn)
     conn.commit()
     try:
         for src in sources[1:]:
