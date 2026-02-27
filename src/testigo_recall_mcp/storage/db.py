@@ -90,7 +90,7 @@ class Database:
     def __init__(self, db_path: str | Path | None = None):
         self._path = Path(db_path) if db_path else _DEFAULT_DB_PATH
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path))
+        self._conn = sqlite3.connect(str(self._path), timeout=10)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._migrate()
