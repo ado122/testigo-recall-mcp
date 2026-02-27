@@ -410,14 +410,24 @@ def _resolve_db_path() -> str | None:
     if len(sources) == 1:
         return str(sources[0])
 
-    # Multiple sources — merge into a temp DB
-    merged_path = Path(tempfile.gettempdir()) / "testigo-recall-merged.db"
+    # Multiple sources — merge into a PID-scoped temp DB to avoid
+    # conflicts when multiple MCP server instances run simultaneously
+    merged_path = Path(tempfile.gettempdir()) / f"testigo-recall-merged-{os.getpid()}.db"
+
+    # Clean up stale merged DBs from dead processes
+    for stale in Path(tempfile.gettempdir()).glob("testigo-recall-merged-*.db"):
+        if stale == merged_path:
+            continue
+        try:
+            stale.unlink()
+        except OSError:
+            pass  # still in use by another live process
 
     # Copy first source as base (preserves schema + FTS)
     shutil.copy2(sources[0], merged_path)
     logger.info("Base DB: %s", sources[0])
 
-    conn = sqlite3.connect(str(merged_path))
+    conn = sqlite3.connect(str(merged_path), timeout=10)
     conn.row_factory = sqlite3.Row
 
     # Migrate base DB schema — the copied DB may predate newer columns/tables.
