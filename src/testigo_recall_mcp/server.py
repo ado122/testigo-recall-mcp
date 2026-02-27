@@ -3,13 +3,22 @@
 Exposes the codebase knowledge base as tools that any MCP-compatible
 AI agent (Claude Code, Cursor, Windsurf, etc.) can call directly.
 
-On startup, if TESTIGO_RECALL_REPO is set (e.g. "owner/repo"), the server
-automatically downloads the latest knowledge base from the GitHub
-release — no external tools required.
+On startup the server automatically downloads the latest knowledge base
+from one of the supported backends — no external tools required.
+
+Backends (configure via env vars):
+  GitHub Releases:    TESTIGO_RECALL_REPO=owner/repo  (+ GITHUB_TOKEN for private repos)
+  Azure Blob Storage: TESTIGO_RECALL_AZURE_URL=https://account.blob.core.windows.net/container
+                      Auth: az CLI session (az login) > SAS token > public container
+                      Optional: TESTIGO_RECALL_AZURE_SAS=sv=...&se=...&sp=rl&sig=...
+  Local files:        TESTIGO_RECALL_DB_PATH=/path/to/db1.db,/path/to/db2.db
+
+All backends can be used simultaneously — DBs are merged at startup.
 
 Usage:
     testigo-recall-mcp                # stdio transport (default)
     TESTIGO_RECALL_REPO=owner/repo testigo-recall-mcp
+    TESTIGO_RECALL_AZURE_URL=https://acct.blob.core.windows.net/kb testigo-recall-mcp
 """
 
 from __future__ import annotations
@@ -20,9 +29,12 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -236,12 +248,133 @@ def _sync_db_from_github(repo: str, cache_dir: Path) -> list[Path]:
         return []
 
 
+def _get_azure_bearer_token() -> str | None:
+    """Get an OAuth bearer token from the Azure CLI session (az login).
+
+    Calls 'az account get-access-token' to retrieve a token scoped to
+    Azure Storage. This works when the developer is logged in via 'az login'
+    — no secrets or SAS tokens needed.
+
+    Returns the bearer token string, or None if az CLI is unavailable or
+    the user isn't logged in.
+    """
+    try:
+        result = subprocess.run(
+            ["az", "account", "get-access-token", "--resource", "https://storage.azure.com", "--output", "json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            logger.debug("az CLI auth failed (returncode %d): %s", result.returncode, result.stderr.strip())
+            return None
+        data = json.loads(result.stdout)
+        token = data.get("accessToken")
+        if token:
+            logger.info("Using Azure CLI auth (az login)")
+        return token
+    except FileNotFoundError:
+        logger.debug("az CLI not installed — skipping Azure CLI auth")
+        return None
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+        logger.debug("az CLI auth failed: %s", e)
+        return None
+
+
+def _sync_db_from_azure_blob(
+    container_url: str,
+    sas_token: str,
+    cache_dir: Path,
+    bearer_token: str | None = None,
+) -> list[Path]:
+    """Download all .db blobs from an Azure Blob Storage container.
+
+    Uses the Azure Blob REST API directly — no Azure SDK required.
+
+    Auth priority (first that works wins):
+      1. SAS token (if provided)
+      2. Bearer token (pre-fetched from az CLI, passed by caller)
+      3. No auth (for public containers)
+
+    Args:
+        container_url: Full container URL, e.g. https://acct.blob.core.windows.net/container
+        sas_token: SAS token string (can be empty for CLI auth or public containers)
+        cache_dir: Local directory to store downloaded .db files
+        bearer_token: Pre-fetched Azure CLI bearer token (avoids repeated az CLI calls)
+
+    Returns list of downloaded file paths (empty on failure).
+    """
+    # Normalize: strip trailing slash from URL, strip leading '?' from SAS
+    container_url = container_url.rstrip("/")
+    sas_token = sas_token.lstrip("?")
+
+    def _make_url(base_url: str) -> str:
+        """Append SAS token to URL if available."""
+        if sas_token:
+            sep = "&" if "?" in base_url else "?"
+            return f"{base_url}{sep}{sas_token}"
+        return base_url
+
+    def _make_request(url: str) -> urllib.request.Request:
+        """Create a request with appropriate auth headers."""
+        req = urllib.request.Request(url)
+        if bearer_token:
+            req.add_header("Authorization", f"Bearer {bearer_token}")
+            req.add_header("x-ms-version", "2020-10-02")
+        return req
+
+    try:
+        # Step 1: List all blobs in the container
+        list_url = _make_url(f"{container_url}?restype=container&comp=list")
+        req = _make_request(list_url)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            xml_body = resp.read()
+
+        root = ET.fromstring(xml_body)
+        # Azure Blob List XML: <EnumerationResults><Blobs><Blob><Name>...</Name></Blob></Blobs></EnumerationResults>
+        db_blobs: list[str] = []
+        for blob_elem in root.iter("Blob"):
+            name_elem = blob_elem.find("Name")
+            if name_elem is not None and name_elem.text and name_elem.text.endswith(".db"):
+                db_blobs.append(name_elem.text)
+
+        if not db_blobs:
+            logger.warning("No .db blobs in Azure container %s", container_url)
+            return []
+
+        # Step 2: Download each .db blob
+        paths: list[Path] = []
+        for blob_name in db_blobs:
+            db_path = cache_dir / blob_name
+            try:
+                blob_url = _make_url(f"{container_url}/{blob_name}")
+                req = _make_request(blob_url)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    db_path.write_bytes(resp.read())
+                logger.info("Downloaded %s from Azure Blob Storage", blob_name)
+                paths.append(db_path)
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError) as e:
+                logger.warning("Failed to download %s from Azure: %s", blob_name, e)
+        return paths
+    except urllib.error.HTTPError as e:
+        logger.warning("Could not list Azure container %s: HTTP %d", container_url, e.code)
+        return []
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        logger.warning("Could not access Azure container %s: %s", container_url, e)
+        return []
+    except ET.ParseError as e:
+        logger.warning("Invalid XML response from Azure container %s: %s", container_url, e)
+        return []
+
+
 def _collect_sources() -> list[Path]:
     """Collect all DB sources from env vars.
 
     Supports comma-separated values for multiple sources:
       TESTIGO_RECALL_DB_PATH=local1.db,local2.db
       TESTIGO_RECALL_REPO=org/repo-a,org/repo-b
+      TESTIGO_RECALL_AZURE_URL=https://acct.blob.core.windows.net/container
+      TESTIGO_RECALL_AZURE_SAS=sv=...&se=...&sp=rl&sig=...
+
+    All backends can be combined — DBs are merged at startup.
     """
     sources: list[Path] = []
 
@@ -279,6 +412,45 @@ def _collect_sources() -> list[Path]:
                     sources.extend(cached)
                 else:
                     logger.warning("No knowledge base available for %s", repo)
+
+    # Azure Blob Storage (comma-separated URLs, shared SAS token)
+    azure_urls = os.environ.get("TESTIGO_RECALL_AZURE_URL")
+    azure_sas = os.environ.get("TESTIGO_RECALL_AZURE_SAS", "")
+    if azure_urls:
+        # Pre-fetch bearer token once for all Azure URLs (avoid repeated az CLI calls)
+        azure_bearer: str | None = None
+        if not azure_sas:
+            azure_bearer = _get_azure_bearer_token()
+
+        for url in azure_urls.split(","):
+            url = url.strip()
+            if not url:
+                continue
+            # Derive cache dir from URL: https://acct.blob.core.windows.net/container -> azure--acct--container
+            try:
+                parsed = urllib.parse.urlparse(url)
+                account = parsed.hostname.split(".")[0] if parsed.hostname else "unknown"
+                container = parsed.path.strip("/").split("/")[0] if parsed.path else "default"
+                cache_key = f"azure--{account}--{container}"
+            except Exception:
+                # Stable fallback: use URL without scheme as cache key
+                cache_key = f"azure--{url.replace('://', '--').replace('/', '--')}"
+
+            cache_dir = Path.home() / ".testigo-recall" / cache_key
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+            logger.info("Syncing knowledge base from Azure Blob Storage: %s ...", url)
+            downloaded = _sync_db_from_azure_blob(url, azure_sas, cache_dir, bearer_token=azure_bearer)
+            if downloaded:
+                sources.extend(downloaded)
+            else:
+                # Fallback: use any cached .db files in the directory
+                cached = sorted(cache_dir.glob("*.db"))
+                if cached:
+                    logger.info("Using %d cached DB(s) from %s", len(cached), cache_dir)
+                    sources.extend(cached)
+                else:
+                    logger.warning("No knowledge base available from Azure: %s", url)
 
     return sources
 
