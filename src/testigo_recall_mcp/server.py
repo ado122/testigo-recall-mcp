@@ -259,8 +259,9 @@ def _get_azure_bearer_token() -> str | None:
     the user isn't logged in.
     """
     try:
+        az_cmd = shutil.which("az") or "az"
         result = subprocess.run(
-            ["az", "account", "get-access-token", "--resource", "https://storage.azure.com", "--output", "json"],
+            [az_cmd, "account", "get-access-token", "--resource", "https://storage.azure.com", "--output", "json"],
             capture_output=True, text=True, timeout=15,
         )
         if result.returncode != 0:
