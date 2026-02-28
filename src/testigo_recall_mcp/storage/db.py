@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS pr_analyses (
     timestamp TEXT NOT NULL,
     files TEXT NOT NULL,
     kinds TEXT NOT NULL,
+    triggered_by TEXT DEFAULT NULL,
     PRIMARY KEY (pr_id, repo)
 );
 
@@ -118,6 +119,12 @@ class Database:
                 "INSERT INTO facts_fts(rowid, summary, detail, symbols) "
                 "SELECT id, summary, detail, symbols FROM facts"
             )
+            self._conn.commit()
+
+        # Add triggered_by column to pr_analyses if missing (older DBs)
+        pa_cols = {r[1] for r in c.execute("PRAGMA table_info(pr_analyses)").fetchall()}
+        if "triggered_by" not in pa_cols:
+            c.execute("ALTER TABLE pr_analyses ADD COLUMN triggered_by TEXT DEFAULT NULL")
             self._conn.commit()
 
         # Add repo_dependencies table if missing (older DBs)
@@ -270,7 +277,8 @@ class Database:
         if category:
             rows = c.execute(
                 "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-                "f.confidence, f.source, f.source_files, f.symbols, p.timestamp "
+                "f.confidence, f.source, f.source_files, f.symbols, "
+                "p.timestamp, p.triggered_by "
                 "FROM facts f "
                 "JOIN pr_analyses p ON f.pr_id = p.pr_id AND f.repo = p.repo "
                 "WHERE f.category = ? "
@@ -280,7 +288,8 @@ class Database:
         else:
             rows = c.execute(
                 "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-                "f.confidence, f.source, f.source_files, f.symbols, p.timestamp "
+                "f.confidence, f.source, f.source_files, f.symbols, "
+                "p.timestamp, p.triggered_by "
                 "FROM facts f "
                 "JOIN pr_analyses p ON f.pr_id = p.pr_id AND f.repo = p.repo "
                 "ORDER BY p.timestamp DESC LIMIT ?",
@@ -328,7 +337,7 @@ class Database:
         query = (
             "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
             "f.confidence, f.source, f.source_files, f.symbols, "
-            "pa.timestamp, "
+            "pa.timestamp, pa.triggered_by, "
             "bm25(facts_fts, 10.0, 5.0, 15.0) AS relevance "
             "FROM facts_fts fts "
             "JOIN facts f ON f.id = fts.rowid "
@@ -362,7 +371,8 @@ class Database:
         pattern = f"%{term}%"
         query = (
             "SELECT f.pr_id, f.repo, f.category, f.summary, f.detail, "
-            "f.confidence, f.source, f.source_files, f.symbols, pa.timestamp "
+            "f.confidence, f.source, f.source_files, f.symbols, "
+            "pa.timestamp, pa.triggered_by "
             "FROM facts f "
             "JOIN pr_analyses pa ON pa.pr_id = f.pr_id AND pa.repo = f.repo "
             "WHERE (f.summary LIKE ? OR f.detail LIKE ?)"
