@@ -133,7 +133,7 @@ _STATIC_INSTRUCTIONS = (
 )
 
 # Fields that waste tokens without adding value for AI agents
-_NOISE_FIELDS = frozenset({"source", "timestamp", "relevance"})
+_NOISE_FIELDS = frozenset({"source", "relevance"})
 
 _db: Database | None = None
 
