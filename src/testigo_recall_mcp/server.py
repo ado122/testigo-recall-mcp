@@ -133,14 +133,18 @@ _STATIC_INSTRUCTIONS = (
 )
 
 # Fields that waste tokens without adding value for AI agents
-_NOISE_FIELDS = frozenset({"source", "relevance"})
+_NOISE_FIELDS = frozenset({"source", "relevance", "pr_id"})
 
 _db: Database | None = None
 
 
 def _clean_facts(facts: list[dict]) -> list[dict]:
     """Remove noise fields from fact dicts to save tokens."""
-    return [{k: v for k, v in f.items() if k not in _NOISE_FIELDS} for f in facts]
+    return [
+        {k: v for k, v in f.items()
+         if k not in _NOISE_FIELDS and not (k == "symbols" and v == [])}
+        for f in facts
+    ]
 
 
 # Tokens stripped before word-overlap comparison (country/locale names)
