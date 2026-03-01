@@ -481,6 +481,11 @@ def _migrate_connection(conn: sqlite3.Connection) -> None:
             "SELECT id, summary, detail, symbols FROM facts"
         )
 
+    # Add triggered_by column to pr_analyses if missing
+    pa_cols = {r[1] for r in c.execute("PRAGMA table_info(pr_analyses)").fetchall()}
+    if "triggered_by" not in pa_cols:
+        c.execute("ALTER TABLE pr_analyses ADD COLUMN triggered_by TEXT DEFAULT NULL")
+
     # Ensure repo_dependencies table exists (base DB may predate this feature)
     c.execute(
         "CREATE TABLE IF NOT EXISTS repo_dependencies ("
@@ -507,9 +512,12 @@ def _merge_into(target: sqlite3.Connection, source_path: Path) -> int:
     target.execute("ATTACH DATABASE ? AS src", (str(source_path),))
 
     # Replace pr_analyses (natural PK handles conflicts)
+    # Use explicit columns to handle schema mismatches (older DBs may lack triggered_by)
+    src_pa_cols = {r[1] for r in target.execute("PRAGMA src.table_info(pr_analyses)").fetchall()}
+    triggered_by_expr = "triggered_by" if "triggered_by" in src_pa_cols else "NULL"
     target.execute(
-        "INSERT OR REPLACE INTO pr_analyses "
-        "SELECT * FROM src.pr_analyses"
+        "INSERT OR REPLACE INTO pr_analyses (pr_id, repo, timestamp, files, kinds, triggered_by) "
+        f"SELECT pr_id, repo, timestamp, files, kinds, {triggered_by_expr} FROM src.pr_analyses"
     )
 
     # Clear facts/deps for modules we're importing (avoid duplicates)
