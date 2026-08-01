@@ -1,12 +1,14 @@
 [project]
 name = "testigo-recall-mcp"
-version = "0.5.5"
+version = "0.5.6"
 description = "MCP server for querying testigo-recall knowledge bases"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.5",
-    "mcp>=1.0",
+    # mcp 2.0.0 removed the mcp.server.fastmcp module this server imports.
+    # Pin below 2.0 until the code is migrated to the 2.0 API.
+    "mcp>=1.0,<2.0",
 ]
 
 [project.scripts]

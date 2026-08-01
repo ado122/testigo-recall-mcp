@@ -702,7 +702,7 @@ def search_codebase(
             Use semicolons to batch multiple searches: "auth login; session JWT; middleware"
         category: Optional filter — "behavior" (what it does), "design" (how it's built), or "assumption" (what it expects)
         min_confidence: Minimum confidence threshold 0.0-1.0 (default: 0.0)
-        limit: Max results per query (default: 20). With batched queries, total results can be up to limit × number of queries (max 70).
+        limit: Max results per query (default: 20). With batched queries, total results can be up to limit × number of queries (max 65).
         repo_name: Optional filter to scope search to a specific repository
     """
     # Input validation
@@ -732,7 +732,7 @@ def search_codebase(
                     results.append(fact)
         # Cap total results — hard ceiling prevents output-too-large (~50KB)
         # regardless of how many semicolon queries are batched
-        max_total = min(limit * len(queries), 70)
+        max_total = min(limit * len(queries), 65)
         results = results[:max_total]
 
     if not results:
