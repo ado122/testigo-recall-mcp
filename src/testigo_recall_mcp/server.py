@@ -156,8 +156,6 @@ def _clean_facts(facts: list[dict]) -> list[dict]:
 _COUNTRY_TOKENS = frozenset({
     "cz", "sk", "pl", "ro", "it", "hu", "en",
     "czech", "slovak", "polish", "romanian", "italian", "hungarian",
-    "cz-drmax", "sk-drmax", "pl-drmax", "ro-drmax", "it-drmax", "hu-drmax",
-    "pl-apteka", "pl-drogeria", "pl2-drmax",
 })
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")

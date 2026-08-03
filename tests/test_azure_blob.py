@@ -766,7 +766,7 @@ class TestCollectSources:
     def test_azure_blob_source(self, tmp_path: Path):
         """Collects DBs from Azure Blob Storage."""
         db_content = _make_test_db(tmp_path / "source.db").read_bytes()
-        list_xml = _azure_list_xml("drmax.db")
+        list_xml = _azure_list_xml("acme.db")
 
         call_count = 0
         def mock_urlopen(req, timeout=None):
@@ -786,7 +786,7 @@ class TestCollectSources:
                 sources = _collect_sources()
 
         assert len(sources) == 1
-        assert sources[0].name == "drmax.db"
+        assert sources[0].name == "acme.db"
 
     def test_azure_cache_fallback(self, tmp_path: Path):
         """Falls back to cached Azure DBs when download fails."""
@@ -966,7 +966,7 @@ class TestCollectSources:
             return MockResponse(list_xml)
 
         env = self._clean_env()
-        env["TESTIGO_RECALL_AZURE_URL"] = "https://drmaxstorage.blob.core.windows.net/testigo-kb"
+        env["TESTIGO_RECALL_AZURE_URL"] = "https://acmestorage.blob.core.windows.net/testigo-kb"
         env["TESTIGO_RECALL_AZURE_SAS"] = "sv=2023&sp=rl&sig=xyz"
 
         with mock.patch.dict(os.environ, env, clear=True):
@@ -975,7 +975,7 @@ class TestCollectSources:
                     _collect_sources()
 
         # Cache dir should exist with expected name
-        expected_cache = tmp_path / ".testigo-recall" / "azure--drmaxstorage--testigo-kb"
+        expected_cache = tmp_path / ".testigo-recall" / "azure--acmestorage--testigo-kb"
         assert expected_cache.exists()
 
 
