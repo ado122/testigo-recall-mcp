@@ -12,6 +12,8 @@ Backends (configure via env vars):
                       Auth: az CLI session (az login) > SAS token > public container
                       Optional: TESTIGO_RECALL_AZURE_SAS=sv=...&se=...&sp=rl&sig=...
   Local files:        TESTIGO_RECALL_DB_PATH=/path/to/db1.db,/path/to/db2.db
+                      Directories are expanded to all *.db files inside:
+                      TESTIGO_RECALL_DB_PATH=/path/to/db-folder
 
 All backends can be used simultaneously — DBs are merged at startup.
 
@@ -378,6 +380,7 @@ def _collect_sources() -> list[Path]:
 
     Supports comma-separated values for multiple sources:
       TESTIGO_RECALL_DB_PATH=local1.db,local2.db
+      TESTIGO_RECALL_DB_PATH=/path/to/db-folder   (expands to all *.db inside)
       TESTIGO_RECALL_REPO=org/repo-a,org/repo-b
       TESTIGO_RECALL_AZURE_URL=https://acct.blob.core.windows.net/container
       TESTIGO_RECALL_AZURE_SAS=sv=...&se=...&sp=rl&sig=...
@@ -386,14 +389,21 @@ def _collect_sources() -> list[Path]:
     """
     sources: list[Path] = []
 
-    # Local DB paths (comma-separated)
+    # Local DB paths (comma-separated; a directory includes all *.db files in it)
     local = os.environ.get("TESTIGO_RECALL_DB_PATH") or os.environ.get("PR_IMPACT_DB_PATH")
     if local:
         for p in local.split(","):
             p = p.strip()
             if p:
                 path = Path(p)
-                if path.exists():
+                if path.is_dir():
+                    dbs = sorted(path.glob("*.db"))
+                    if dbs:
+                        logger.info("Found %d DB(s) in directory %s", len(dbs), p)
+                        sources.extend(dbs)
+                    else:
+                        logger.warning("No .db files found in directory: %s", p)
+                elif path.exists():
                     sources.append(path)
                 else:
                     logger.warning("Local DB not found: %s", p)
