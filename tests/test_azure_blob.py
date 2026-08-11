@@ -740,6 +740,48 @@ class TestCollectSources:
 
         assert len(sources) == 2
 
+    def test_local_dir_path(self, tmp_path: Path):
+        """Expands a directory path to all *.db files inside (sorted)."""
+        db_dir = tmp_path / "kb"
+        db_dir.mkdir()
+        _make_test_db(db_dir / "b.db")
+        _make_test_db(db_dir / "a.db")
+        (db_dir / "notes.txt").write_text("not a db")
+        env = self._clean_env()
+        env["TESTIGO_RECALL_DB_PATH"] = str(db_dir)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            sources = _collect_sources()
+
+        assert [s.name for s in sources] == ["a.db", "b.db"]
+
+    def test_local_dir_mixed_with_files(self, tmp_path: Path):
+        """Handles a directory and a plain file in the same comma-separated value."""
+        db_dir = tmp_path / "kb"
+        db_dir.mkdir()
+        _make_test_db(db_dir / "inside.db")
+        single = _make_test_db(tmp_path / "single.db")
+        env = self._clean_env()
+        env["TESTIGO_RECALL_DB_PATH"] = f"{db_dir},{single}"
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            sources = _collect_sources()
+
+        assert len(sources) == 2
+        assert {s.name for s in sources} == {"inside.db", "single.db"}
+
+    def test_local_dir_empty(self, tmp_path: Path):
+        """An empty directory contributes no sources (warning, no crash)."""
+        db_dir = tmp_path / "empty"
+        db_dir.mkdir()
+        env = self._clean_env()
+        env["TESTIGO_RECALL_DB_PATH"] = str(db_dir)
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            sources = _collect_sources()
+
+        assert sources == []
+
     def test_local_path_missing_file(self, tmp_path: Path):
         """Skips missing local paths with warning (doesn't crash)."""
         db_path = _make_test_db(tmp_path / "exists.db")
